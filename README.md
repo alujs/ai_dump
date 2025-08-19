@@ -1,4 +1,5 @@
 ## LOGS ##
+Navigate the logs quickly by just searching my user, alujs 
 
 **claude_things_for_monday.md**
 
