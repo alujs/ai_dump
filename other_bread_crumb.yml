@@ -1,0 +1,142 @@
+# ===== BASIC IDENTIFICATION =====
+id: angular_editor
+name: "Angular World Editor Suite"
+description: "Unified single-surface editor. All mutations route through an Editor→ECS bridge; visuals derive from ECS via RenderPackage."
+path: "apps/editor/src/app"
+
+# ===== ENHANCED ENTRY POINTS =====
+entry_points:
+  - "UnifiedEditorComponent (UI host) [unified-editor.component.ts] - OPERATIONAL:single_surface"
+  - "Viewport wiring: updateViewport() + DPR ZoC overlay [unified-editor.component.ts] - OPERATIONAL:viewport_sync"
+  - "FoW view sync: setView('fow') forces enable + setFogPlayer [unified-editor.component.ts] - COMPLETE:fow_perspective"
+  - "FoW panel UX: openFowPanel() / cancelFowPanel() [unified-editor.component.ts] - COMPLETE:submenu_with_cancel"
+  - "Click hitbox: snapToNearestHex(worldX,worldY) [unified-editor.component.ts] - COMPLETE:selection_qol"
+  - "ZoC overlay: faction-wide fill, contested highlight, and individual ring [unified-editor.component.ts] - COMPLETE:zoc_multi_layer_visuals"
+  - "Faction switcher: setActiveFaction('P1'|'P2') controls spawn ownership [unified-editor.component.ts] - COMPLETE:spawn_control"
+  - "Terrain palette: icon legend + click-outside auto-close [unified-editor.component.ts] - COMPLETE:palette_ux"
+  - "EditorECSBridge.createArmy() [services/editor-ecs-bridge.ts] - REQUIRED:canonical_mutation_path"
+  - "EditorECSBridge.moveArmy() [services/editor-ecs-bridge.ts] - REQUIRED:canonical_mutation_path"
+  - "EditorECSBridge.deleteArmy() [services/editor-ecs-bridge.ts] - REQUIRED:canonical_mutation_path"
+  - "RuntimeService (engine wiring) [runtime.service.ts] - OPERATIONAL:engine_adapter"
+  - "Encounter wiring: beginDefaultEncounter(), reinforcements UI [unified-editor.component.ts/runtime.service.ts] - GREEN:queue_integrated"
+  - "ToolManager + Tools [tools/*] - OPERATIONAL:route_actions_via_bridge"
+
+# ===== SYSTEM HEALTH =====
+status: "OPERATIONAL"
+last_tested: "2025-08-18T20:05:00Z"
+known_issues: 
+  - "Fixed: Combat algorithm showing 15 zones for 2 armies - replaced with ZoneOfControlManager integration - 2025-08-15"
+  - "Fixed: FoW phantom entities not properly handled - added sophisticated phantom intel system - 2025-08-15"
+  - "Optional: add terrain tile cache in adapter for even smoother scroll at hexHeight>=120"
+  - "Resolved: FoW toggle not taking effect when switching views - setView enforces svc.setFogEnabled+setFogPlayer - 2025-08-18"
+  - "Resolved: UI + map scrolling together due to log panel inside scroll - log moved outside and fixed - 2025-08-18"
+
+# ===== DEBUGGING SUPPORT =====
+debugging_recipes:
+  no_ui_panel_appears:
+    description: "Tool selected but UI panel doesn't show"
+    check: "Tool state vs component state synchronization"
+    commands:
+      - "debug:tools"
+      - "debug:editor"
+    common_cause: "Tool selection not communicated to parent component"
+
+  terrain_painting_not_working:
+    description: "Terrain selection doesn't modify map"
+    check: "Verify terrain paint calls EditorECSBridge.terrainPaint() -> engine mutator"
+    commands:
+      - "debug:editor"
+      - "debug:engine"
+    common_cause: "UI bypassing bridge or mutating local arrays"
+
+  combat_not_detecting:
+    description: "Adjacent armies don't engage in combat"
+    check: "EditorECSBridge updates owner/composition; ensure RenderPackage reflects changes"
+    commands:
+      - "debug:combat"
+      - "debug:status"
+    common_cause: "Editor didn't call ECS mutators; render derived from stale state"
+
+  combat_showing_15_zones_for_2_armies:
+    description: "FIXED: Combat algorithm was showing 15 engagement zones for 2 armies"
+    check: "Verify findPressureOverlapZones uses ZoneOfControlManager, not broken grid iteration"
+    commands:
+      - "debug:zoc"
+      - "debug:combat --pressure"
+    common_cause: "Was iterating through 20x20 grid instead of checking actual army positions"
+    fix_applied: "2025-08-15: Replaced with ZoneOfControlManager.calculatePressureAtHex integration"
+
+  phantom_entities_not_appearing:
+    description: "FIXED: P1 entity no longer sees P2. P2's army entity turns into phantom"
+    check: "Verify FogOfWarManager integration and phantom intel creation"
+    commands:
+      - "debug:fow"
+      - "debug:visibility"
+      - "debug:phantom-intel"
+    common_cause: "Was using simplified visibility calculation instead of sophisticated FogOfWarManager"
+    fix_applied: "2025-08-15: Integrated VisionLevel.PHANTOM system with proper phantom intel creation"
+
+# ===== DATA FLOW TRACKING =====
+data_flow:
+  primary: "User Click → Tool → UnifiedEditorComponent → EditorECSBridge → Engine ECS → RenderPackage → Adapter"
+  failure_points:
+    - "Tool state not synchronizing with UI"
+    - "Component methods not calling engine properly"
+    - "Tool context not updating with faction changes"
+
+# ===== EXISTING FIELDS (ENHANCED) =====
+invariants:
+  - "All mutations go through EditorECSBridge into engine ECS mutators"
+  - "UI components never mutate game state directly"
+  - "Single UnifiedEditorComponent manages all editing"
+  - "Adapter renders only RenderPackage derived from ECS"
+risk_level: high
+debug_commands:
+  - "debug:editor"
+  - "debug:commands"
+  - "debug:tools"
+  - "debug:status"
+  - "debug:render"
+tests:
+  - "TBD - editor-driven smoke/E2E: spawn → ECS → render → ZoC/FoW"
+  - "Unit: EditorECSBridge methods"
+  - "Integration: ECS ZoC/FoW/Combat already present in engine"
+owner: "ui_team"
+dependencies:
+  - "command_system"
+  - "editor_tools"
+  - "runtime_service"
+  - "game_engine"
+  - "pixi_renderer"
+ai_notes: "Architecture simplified to single UnifiedEditorComponent with required EditorECSBridge. All critical methods complete; all major functionality operational as of 2025-08-15. Any feature folders must route through UnifiedEditorComponent; no standalone editors."
+
+# ===== AI SESSION TRACKING =====
+recent_sessions:
+  - agent: "github_copilot"
+    date: "2025-08-17"
+    focus: "Console spam elimination, ZoC combat fixing, proper engagement detection"
+    changes: 
+      - "Disabled excessive ZoC calculation logging in zoc-calculation.engine.ts"
+      - "Removed selection info logging spam in unified-editor.component.ts"
+      - "Rewrote calculateEngagements() for proper army-to-army detection"
+      - "Implemented full combat resolution with damage and termination"
+      - "Fixed combat stepping to apply real damage using RuntimeService.updateArmy()"
+    outcome: "Console clean, combat shows 1-2 meaningful engagements, progressive damage system working"
+
+# ===== SYSTEM HEALTH UPDATE =====
+system_health_update: "2025-08-17T04:45:00Z"
+last_reviewed: "2025-08-18"
+performance_improvements:
+  - "Console logging optimized - eliminated spam from ZoC calculations"
+  - "Combat detection rewritten - reduced from 9 to 1-2 meaningful zones"
+  - "Combat resolution functional - armies take proportional damage per step"
+combat_system_status: "FULLY_OPERATIONAL"
+known_console_issues: "RESOLVED"
+
+# ===== PREVIOUS SESSION RECORD =====
+previous_session:
+  agent: "github_copilot"
+  date: "2025-08-15"
+  focus: "Critical functionality restoration and UI synchronization"
+  changes: ["FoW player perspective fixed", "Combat system integrated", "Entity editor UI sync implemented", "Terrain painting operational", "Faction context updates"]
+  outcome: "All critical functionality now operational - editor fully functional"
