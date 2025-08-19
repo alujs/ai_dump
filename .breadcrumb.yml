@@ -1,0 +1,65 @@
+# ===== BASIC IDENTIFICATION =====
+id: combat_orchestrator
+name: "ZoC Combat Orchestrator"
+description: "Tick-based ZoC combat orchestrator with ranged-first resolution, stance-aware movement, and command-queue integration"
+path: "packages/engine/src/systems/combat-orchestrator"
+
+# ===== ENHANCED ENTRY POINTS =====
+entry_points:
+  - "processCommand(cmd) [index.ts] - GREEN:queue_driven_orchestration"
+  - "stepCombat(state, ticks) [index.ts] - GREEN:tick_phases_ranged_move_melee_morale"
+  - "AddReinforcement [index.ts] - GREEN:scheduling_and_arrival_events"
+  - "HQ rules gate melee [index.ts] - GREEN:HQCompromised_event"
+
+# ===== SYSTEM HEALTH =====
+status: "GREEN"
+last_tested: "2025-08-17T07:26:00Z"
+known_issues: []
+
+# ===== DEBUGGING SUPPORT =====
+debugging_recipes:
+  queue_does_not_advance:
+    description: "StepEncounter produces no events"
+    check: "Ensure commands are enqueued under correct encounterId and FIFO drain occurs on step"
+    commands: ["debug:orchestrator:queue", "debug:orchestrator:tick"]
+    common_cause: "Missing processCommand adapter or wrong encounterId"
+
+# ===== DATA FLOW TRACKING =====
+data_flow:
+  primary: "Editor/Runtime → Command Queue → Orchestrator resolvers → Events → State"
+  failure_points:
+    - "Incorrect encounterId routing"
+    - "Non-deterministic RNG usage"
+
+# ===== EXISTING FIELDS (ENHANCED) =====
+invariants:
+  - "No while-loops in combat resolution"
+  - "Seeded RNG only"
+  - "Deterministic phase ordering"
+risk_level: high
+debug_commands:
+  - "debug:orchestrator:queue"
+  - "debug:orchestrator:tick"
+  - "debug:status"
+tests:
+  - "packages/engine/src/systems/combat-orchestrator/command-queue.integration.test.ts (queue flow, reinforcements, HQ)"
+  - "apps/editor/src/commands/zoc-combat.integration.test.ts (smoke)"
+owner: "engine_team"
+last_reviewed: "2025-08-17"
+dependencies:
+  - "entity_system"
+  - "ai_logger"
+  - "concrete_combat"
+ai_notes: "Command-queue front end implemented; reinforcements scheduling and HQ melee gate added; tests green."
+
+# ===== AI SESSION TRACKING =====
+recent_sessions:
+  - agent: "github_copilot"
+    date: "2025-08-17"
+    focus: "Implement queue, reinforcements, HQ rules, tests"
+    changes: [
+      "packages/engine/src/systems/combat-orchestrator/index.ts",
+      "packages/engine/src/systems/combat-orchestrator/command-queue.integration.test.ts",
+      "packages/engine/src/systems/combat-orchestrator/.breadcrumb.yml"
+    ]
+    outcome: "All new tests pass; system operational"
