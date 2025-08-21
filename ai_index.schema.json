@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI_INDEX",
+  "type": "object",
+  "required": ["packages"],
+  "properties": {
+    "packages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["id", "path", "entrypoints", "key_symbols", "interfaces", "tests", "invariants", "owners"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "entrypoints": { "type": "array", "items": { "type": "string" } },
+          "domains": { "type": "array", "items": { "type": "string" } },
+          "key_symbols": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["file", "symbol", "kind"],
+              "properties": {
+                "file": { "type": "string" },
+                "symbol": { "type": "string" },
+                "kind": { "type": "string", "enum": ["function", "class", "component", "hook", "service"] }
+              }
+            }
+          },
+          "interfaces": {
+            "type": "object",
+            "required": ["consumes", "provides"],
+            "properties": {
+              "consumes": { "type": "array", "items": { "type": "string" } },
+              "provides": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "tests": { "type": "array", "items": { "type": "string" } },
+          "invariants": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "owners": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        }
+      }
+    },
+    "retrieval_hints": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

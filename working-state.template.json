@@ -1,0 +1,26 @@
+{
+  "title": "Fix payroll date rollover bug (UTC→local off-by-one)",
+  "acceptance": [
+    "Failing spec passes: PayrollDate.spec 'rolls to next business day'",
+    "No regressions in PayGrid"
+  ],
+  "invariants": [
+    "All date math via tz.ts utilities",
+    "No business logic in UI components"
+  ],
+  "symbols": {
+    "read": [
+      { "file": "packages/payroll-domain/date/tz.ts", "symbol": "getNextBusinessDay" },
+      { "file": "packages/api/PayrollApi.ts", "symbol": "getPayPeriod" }
+    ],
+    "write": [
+      { "file": "packages/payroll-domain/date/formatPayDate.ts", "symbol": "formatPayDate" }
+    ]
+  },
+  "failingTest": {
+    "name": "PayrollDate.spec > rolls to next business day",
+    "trace": "AssertionError: expected '2025-08-18' to equal '2025-08-19' ..."
+  },
+  "lastCheckpoint": "Reproduced failing test in TZ=America/New_York",
+  "lastDiff": ""
+}

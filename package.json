@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "ai:validate": "node .ai/scripts/validate-ai.js",
+    "ai:forbid": "node .ai/scripts/forbid-working-state.js",
+    "ai:packet:check": "node .ai/scripts/packet-budget.js"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1",
+    "js-yaml": "^4.1.0"
+  }
+}

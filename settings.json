@@ -1,0 +1,7 @@
+{
+  "yaml.schemas": { "file:.ai/schemas/ai_index.schema.json": ".ai/AI_INDEX.yml" },
+  "files.watcherExclude": { "**/.ai/out/**": true },
+  "files.exclude": { ".ai/working-state.json": true },
+  "editor.rulers": [100],
+  "editor.wordWrap": "bounded"
+}
