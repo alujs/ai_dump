@@ -476,3 +476,158 @@ If it wobbles → adjust rule texts/tags (don’t add volume yet).
 Optional later: add snapshot fallback; keep Neo4j optional.
 
 
+### Fallback 
+```
+// mcp/server.mjs  (dual-backend with snapshot fallback)
+import fs from 'node:fs';
+import zlib from 'node:zlib';
+import neo4j from 'neo4j-driver';
+const { pipeline } = await import('@xenova/transformers');
+
+// --- config/env ---
+const cfg  = JSON.parse(fs.readFileSync(new URL('../lock.json', import.meta.url)));
+const SNAP = new URL('../snapshot.json.gz', import.meta.url);
+const uri  = process.env.NEO4J_URI  || 'bolt://localhost:7687';
+const user = process.env.NEO4J_USER || 'neo4j';
+const pass = process.env.NEO4J_PASS || 'neo4j';
+const K_DEFAULT = Number(process.env.K || 8);
+
+// --- embedder + reranker (lazy) ---
+let embedder = null, reranker = null;
+async function E() { return embedder ||= await pipeline('feature-extraction', cfg.embedding_model_id); }
+async function R() { return reranker ||= await pipeline('text-classification', cfg.reranker_model_id || 'Xenova/bge-reranker-base', { topk:1 }); }
+
+// --- backend wiring ---
+let backend = 'neo4j';
+let driver, session;
+
+// fp16↦f32 decode (matches snapshot.mjs)
+function f16tof32(h) {
+  const s = (h & 0x8000) >> 15, e = (h & 0x7C00) >> 10, f = h & 0x03FF;
+  if (!e) return (s?-1:1) * Math.pow(2,-14) * (f/1024);
+  if (e===31) return f?NaN:((s?-1:1)*Infinity);
+  return (s?-1:1) * Math.pow(2, e-15) * (1 + f/1024);
+}
+function decodeFp16Base64(b64) {
+  const buf = Buffer.from(b64, 'base64');
+  const u16 = new Uint16Array(buf.buffer, buf.byteOffset, buf.byteLength/2);
+  const out = new Float32Array(u16.length);
+  for (let i=0;i<u16.length;i++) out[i] = f16tof32(u16[i]);
+  return out;
+}
+
+// snapshot store (filled if fallback)
+let SNAP_ENTRIES = []; // {id,path,summary,tags,vec:Float32Array,norm:number}
+
+// cosine KNN over snapshot
+function knnSnapshot(qvec, k) {
+  const qnorm = Math.hypot(...qvec);
+  const scores = SNAP_ENTRIES.map(e => {
+    let dot = 0; const v = e.vec;
+    for (let i=0;i<v.length;i++) dot += v[i]*qvec[i];
+    return { e, score: dot / (e.norm * qnorm) };
+  });
+  scores.sort((a,b)=>b.score-a.score);
+  return scores.slice(0,k).map(({e,score}) => ({
+    path: e.path, summary: e.summary, tags: e.tags||[], score
+  }));
+}
+
+// try Neo4j quickly; else load snapshot
+async function initBackend() {
+  try {
+    driver = neo4j.driver(uri, neo4j.auth.basic(user, pass));
+    session = driver.session();
+    await Promise.race([
+      session.run('RETURN 1 AS ok'),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('neo4j timeout')), 1200))
+    ]);
+    backend = 'neo4j';
+    console.error('[MCP] backend=neo4j');
+  } catch {
+    backend = 'snapshot';
+    if (!fs.existsSync(SNAP)) throw new Error('snapshot.json.gz not found and Neo4j unavailable');
+    const raw = zlib.gunzipSync(fs.readFileSync(SNAP));
+    const snap = JSON.parse(raw);
+    SNAP_ENTRIES = snap.entries.map(x => {
+      const vec = decodeFp16Base64(x.vector_b16);
+      const norm = Math.hypot(...vec);
+      return { id:x.id, path:x.path||null, summary:x.summary, tags:x.tags||[], vec, norm };
+    });
+    console.error(`[MCP] backend=snapshot entries=${SNAP_ENTRIES.length}`);
+  }
+}
+await initBackend();
+
+// --- shared search with rerank ---
+async function doSearch(query, k = K_DEFAULT) {
+  const e = await E();
+  const q = Array.from((await e(query, { pooling:'mean', normalize:true })).data);
+  if (q.length !== cfg.embedding_dim) throw new Error('Dim mismatch with lock.json');
+
+  let pool;
+  if (backend === 'neo4j') {
+    const cypher = `
+      CALL db.index.vector.queryNodes($index, $k, $vec)
+      YIELD node, score
+      RETURN node.path AS path, node.summary AS summary, node.tags AS tags, score
+      ORDER BY score DESC LIMIT $k`;
+    const res = await session.run(cypher, { index: cfg.neo4j_index, k: Math.max(k, K_DEFAULT*4), vec: q });
+    pool = res.records.map(r => ({
+      path: r.get('path'), summary: r.get('summary'), tags: r.get('tags')||[], knn: r.get('score')
+    }));
+  } else {
+    // wider pool for rerank, similar to neo4j path
+    pool = knnSnapshot(q, Math.max(k, K_DEFAULT*4)).map(x => ({ ...x, knn: x.score }));
+  }
+
+  // cross-encoder rerank
+  const rr = await R();
+  for (const it of pool) {
+    const out = rr([{ text: query, text_pair: `${it.summary} [${(it.tags||[]).slice(0,5).join(',')}]` }])[0];
+    it.rerank = (Array.isArray(out) ? out[0].score : out.score) ?? 0;
+  }
+  pool.sort((a,b)=>b.rerank-a.rerank);
+  return pool.slice(0, k).map(it => ({
+    path: it.path, summary: it.summary, tags: it.tags || [], score: it.rerank
+  }));
+}
+
+// --- MCP plumbing (unchanged API) ---
+function write(id, result) { process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id, result })+'\n'); }
+function writeError(id, code, message) { process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id, error:{code,message} })+'\n'); }
+
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', async chunk => {
+  for (const line of chunk.split(/\n/).filter(Boolean)) {
+    let msg; try { msg = JSON.parse(line); } catch { continue; }
+    const { id, method, params = {} } = msg;
+    try {
+      if (method === 'initialize')  return write(id, { protocolVersion:'0.1', capabilities:{ tools:true } });
+      if (method === 'tools/list')  return write(id, { tools:[
+        { name:'vector.search',
+          description:`KNN search (${backend}) with cross-encoder rerank`,
+          input_schema:{ type:'object', properties:{ query:{type:'string'}, k:{type:'integer',default:K_DEFAULT} }, required:['query'] } }
+      ]});
+      if (method === 'tools/call') {
+        const { name, arguments: args = {} } = params;
+        if (name === 'vector.search') {
+          const out = await doSearch(String(args.query||''), Number(args.k||K_DEFAULT));
+          // echo provenance to logs (quick sanity)
+          console.error('[vector.search]', { backend, k: out.length, q: (args.query||'').slice(0,80) });
+          return write(id, { content:[{ type:'text', text: JSON.stringify(out, null, 2) }] });
+        }
+        return writeError(id, -32601, 'Unknown tool');
+      }
+      if (method === 'shutdown') return write(id, null);
+      if (method === 'exit')     return process.exit(0);
+    } catch (err) {
+      writeError(id, -32000, err?.message || 'Internal error');
+    }
+  }
+});
+
+process.on('SIGINT', async () => { try { await session?.close(); await driver?.close(); } finally { process.exit(0); } });
+
+```
+
