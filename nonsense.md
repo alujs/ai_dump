@@ -369,3 +369,63 @@ process.on('SIGINT', async () => { await session.close(); await driver.close(); 
 ```
 
 Turn it on when you want it; otherwise it stays silent.
+
+// scripts/search_rerank.mjs
+import fs from 'node:fs';
+import neo4j from 'neo4j-driver';
+const { pipeline } = await import('@xenova/transformers');
+
+const cfg = JSON.parse(fs.readFileSync(new URL('../lock.json', import.meta.url)));
+const query = process.argv.slice(2).join(' ') || 'accessible tabbed profile card';
+const kEmbed = Number(process.env.K_EMBED || 50);     // initial KNN pool
+const kFinal  = Number(process.env.K_FINAL  || 10);    // after rerank
+
+const uri = process.env.NEO4J_URI || 'bolt://localhost:7687';
+const user = process.env.NEO4J_USER || 'neo4j';
+const pass = process.env.NEO4J_PASS || 'neo4j';
+
+const driver = neo4j.driver(uri, neo4j.auth.basic(user, pass));
+const session = driver.session();
+
+const embedder = await pipeline('feature-extraction', cfg.embedding_model_id);
+const reranker = await pipeline('text-classification', cfg.reranker_model_id, { topk: 1 });
+
+const qvec = Array.from((await embedder(query, { pooling: 'mean', normalize: true })).data);
+if (qvec.length !== cfg.embedding_dim) throw new Error('Dim mismatch with lock.json');
+
+const cypher = `
+CALL db.index.vector.queryNodes($index, $k, $vec)
+YIELD node, score
+RETURN node.path AS path, node.summary AS summary, node.tags AS tags, score
+ORDER BY score DESC
+LIMIT $k`;
+
+const res = await session.run(cypher, { index: cfg.neo4j_index, k: kEmbed, vec: qvec });
+const pool = res.records.map(r => ({
+  path: r.get('path'),
+  summary: r.get('summary'),
+  tags: r.get('tags') || [],
+  knn: r.get('score')
+}));
+
+// Cross-encoder rerank (query, doc) → relevance score
+function pairScore(q, d) {
+  // Many rerankers output a single positive-class score in .score
+  const out = reranker([{ text: q, text_pair: d }])[0];
+  return (Array.isArray(out) ? out[0].score : out.score) ?? 0;
+}
+
+for (const item of pool) {
+  // Keep doc text concise: summary + lightweight tag hint
+  const doc = `${item.summary} [${item.tags.slice(0,5).join(', ')}]`;
+  item.rerank = await pairScore(query, doc);
+}
+
+pool.sort((a, b) => b.rerank - a.rerank);
+for (const it of pool.slice(0, kFinal)) {
+  console.log(`${it.rerank.toFixed(4)}  |  ${it.path}\n  → ${it.summary}`);
+}
+
+await session.close();
+await driver.close();
+
