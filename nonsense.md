@@ -630,4 +630,105 @@ process.stdin.on('data', async chunk => {
 process.on('SIGINT', async () => { try { await session?.close(); await driver?.close(); } finally { process.exit(0); } });
 
 ```
+### How to get a snapshot
 
+```
+// ESM
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import crypto from 'node:crypto';
+const { pipeline } = await import('@xenova/transformers');
+
+const root = new URL('..', import.meta.url);
+const cfg = JSON.parse(fs.readFileSync(new URL('./lock.json', root)));
+const seedDir = new URL('./seed/', root);
+const outPath = new URL('./snapshot.json.gz', root);
+
+// --- helpers ---
+function listJSONL(dir) {
+  return fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')).map(f => new URL(f, dir));
+}
+function readAllSeeds(files) {
+  let lines = [];
+  for (const f of files) {
+    const txt = fs.readFileSync(f, 'utf8');
+    for (const line of txt.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      lines.push({ file: f.pathname, line, obj: JSON.parse(line) });
+    }
+  }
+  return lines;
+}
+function hashString(s) {
+  return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+}
+// float32 -> float16 (IEEE 754) compactly
+function f32tof16(val) {
+  const f32 = new Float32Array(1); const u32 = new Uint32Array(f32.buffer);
+  f32[0] = val; const x = u32[0];
+  const sign = (x >>> 31) & 0x1, exp = (x >>> 23) & 0xff, mant = x & 0x7fffff;
+  if (exp === 0xff) return (sign << 15) | 0x7c00 | (mant ? 0x200 : 0); // inf/NaN
+  if (exp < 113) { // subnormal or zero
+    const m = (mant | 0x800000) >>> (113 - exp);
+    return (sign << 15) | (m + 0x1000 >> 13); // rounded
+  }
+  if (exp > 142) return (sign << 15) | 0x7c00; // overflow -> inf
+  const he = exp - 112; // rebias
+  return (sign << 15) | (he << 10) | ((mant + 0x1000) >> 13); // round to nearest
+}
+function vecToFp16Base64(vec) {
+  const u16 = new Uint16Array(vec.length);
+  for (let i = 0; i < vec.length; i++) u16[i] = f32tof16(vec[i]);
+  return Buffer.from(u16.buffer).toString('base64');
+}
+
+// --- main ---
+const seeds = readAllSeeds(listJSONL(seedDir));
+// deterministic checksum of inputs
+const ruleset_checksum = hashString(
+  seeds.map(s => s.line).join('\n') + '|' +
+  JSON.stringify({ model: cfg.embedding_model_id, dim: cfg.embedding_dim })
+);
+
+// embedder
+const embedder = await pipeline('feature-extraction', cfg.embedding_model_id);
+
+// build entries
+let entries = [];
+for (const { obj } of seeds) {
+  const type = obj.type || (obj.path ? 'CodeExample' : 'Rule');
+  const id = obj.id || obj.path || hashString(JSON.stringify(obj));
+  const summary = obj.summary || obj.text;
+  if (!summary) continue;
+  const tags = Array.isArray(obj.tags) ? obj.tags : [];
+  const out = await embedder(summary, { pooling: 'mean', normalize: true });
+  const vec = Array.from(out.data);
+  if (vec.length !== cfg.embedding_dim) {
+    throw new Error(`Dim mismatch for ${id}: got ${vec.length}, expected ${cfg.embedding_dim}`);
+  }
+  entries.push({
+    id, type,
+    path: obj.path || null,
+    summary: summary.trim(),
+    tags,
+    vector_b16: vecToFp16Base64(vec)
+  });
+}
+
+// sort deterministically
+entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+// write gz snapshot
+const snapshot = {
+  version: 1,
+  embedding_model_id: cfg.embedding_model_id,
+  embedding_dim: cfg.embedding_dim,
+  ruleset_checksum,
+  entries
+};
+const gz = zlib.gzipSync(Buffer.from(JSON.stringify(snapshot)));
+fs.writeFileSync(outPath, gz);
+console.log(`Wrote ${path.basename(outPath.pathname)}  (${gz.length} bytes)`);
+console.log(`checksum: ${hashString(gz)}`);
+```
