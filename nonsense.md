@@ -445,4 +445,34 @@ If any item fails, revise the plan and retry once before emitting code.
 ### Add this to the copilot-instructions.md
 “Always call vector.search for shape cards before emitting code. Obey attributes/events exactly; don’t invent props; prefer programmatic names over aria-label.”
 
+Do this now (one pass)
+
+Freeze inputs: back up current rules; keep copilot-instructions.md tiny (3 lines: “call vector.search; obey cards; skip other preload”).
+
+Emit seeds: use GPT-5-mini to convert active rules + any *.md into seed/rule_cards.jsonl (≤150 tokens per rule, tight tags).
+
+Start storage: docker compose up -d (or skip if you’re snapshot-only for now).
+
+Create index: run your ensure-index once.
+
+Ingest: run the ingest script on the rule cards only (no code yet).
+
+Smoke test: run 3–5 golden queries with graph:search (expect sensible rule hits).
+
+Add rerank: enable KNN→rerank in the MCP’s vector.search.
+
+Launch MCP: start server; confirm it logs tool handshake.
+
+Open fresh Copilot chat: new session (don’t reuse an old context).
+
+Test: in a real file, ask Copilot to refactor using vector.search for shape/tech/rule cards and run the micro-critic before emit.
+
+Then
+
+If retrieval looks good → add code exemplars in small batches (5–10), re-ingest, retest.
+
+If it wobbles → adjust rule texts/tags (don’t add volume yet).
+
+Optional later: add snapshot fallback; keep Neo4j optional.
+
 
