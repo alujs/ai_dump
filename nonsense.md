@@ -442,4 +442,7 @@ Checklist:
 - Is component event/output naming correct?
 If any item fails, revise the plan and retry once before emitting code.
 
+### Add this to the copilot-instructions.md
+“Always call vector.search for shape cards before emitting code. Obey attributes/events exactly; don’t invent props; prefer programmatic names over aria-label.”
+
 
