@@ -370,6 +370,8 @@ process.on('SIGINT', async () => { await session.close(); await driver.close(); 
 
 Turn it on when you want it; otherwise it stays silent.
 
+## 10) Gotta fold in the re-ranker logic
+```
 // scripts/search_rerank.mjs
 import fs from 'node:fs';
 import neo4j from 'neo4j-driver';
@@ -428,4 +430,16 @@ for (const it of pool.slice(0, kFinal)) {
 
 await session.close();
 await driver.close();
+```
+
+
+### Step 3 — Micro-Critic (Pre-Emit)
+Evaluate the planned code changes against the shape cards retrieved earlier. 
+Checklist:
+- Are all required attributes present?
+- Any disallowed attributes added?
+- Do ARIA names follow policy?
+- Is component event/output naming correct?
+If any item fails, revise the plan and retry once before emitting code.
+
 
