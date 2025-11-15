@@ -1,0 +1,157 @@
+// src/extension.ts
+import * as vscode from 'vscode';
+import * as vm from 'vm';
+
+interface CodeActParameters {
+  /**
+   * JavaScript/TypeScript-flavored code to run in the persistent sandbox.
+   * (In a real setup you might transpile TS to JS before running.)
+   */
+  code: string;
+}
+
+/**
+ * Very small "code as action" runtime:
+ * - One vm.Context that survives across invocations
+ * - Captures console.log output
+ * - Returns stdout + error string
+ */
+class CodeActRuntime {
+  private context: vm.Context;
+  private stdoutBuffer: string[] = [];
+
+  constructor() {
+    const self = this;
+
+    const sandbox = {
+      console: {
+        log: (...args: any[]) => {
+          self.stdoutBuffer.push(args.map(String).join(' '));
+        },
+        error: (...args: any[]) => {
+          self.stdoutBuffer.push('[stderr] ' + args.map(String).join(' '));
+        },
+      },
+      // You can expose more safe helpers here:
+      // fs: limitedFs, http: limitedHttp, etc.
+    };
+
+    this.context = vm.createContext(sandbox, {
+      name: 'codeact-sandbox',
+    });
+  }
+
+  async run(code: string): Promise<{ stdout: string; error?: string }> {
+    this.stdoutBuffer = [];
+
+    try {
+      const script = new vm.Script(code, {
+        filename: 'codeact_action.js',
+        displayErrors: true,
+      });
+
+      const result = script.runInContext(this.context, {
+        timeout: 5_000, // ms
+      });
+
+      // If the code returned a Promise, await it
+      if (result && typeof (result as any).then === 'function') {
+        await result;
+      }
+
+      return {
+        stdout: this.stdoutBuffer.join('\n'),
+      };
+    } catch (err: any) {
+      return {
+        stdout: this.stdoutBuffer.join('\n'),
+        error: String(err?.stack ?? err),
+      };
+    }
+  }
+}
+
+class CodeActTool
+  implements vscode.LanguageModelTool<CodeActParameters>
+{
+  private runtime = new CodeActRuntime();
+
+  // Optional: customize the confirmation dialog Copilot shows
+  async prepareInvocation(
+    options: vscode.LanguageModelToolInvocationPrepareOptions<CodeActParameters>,
+    _token: vscode.CancellationToken
+  ): Promise<vscode.LanguageModelToolInvocationPreparation> {
+    const codePreview = (options.input.code ?? '').slice(0, 300);
+
+    return {
+      invocationMessage: 'Running user-defined CodeAct script in sandbox',
+      confirmationMessages: {
+        title: 'Run CodeAct script locally',
+        message: new vscode.MarkdownString(
+          [
+            'The CodeAct tool will run this script in a local sandbox:',
+            '',
+            '```ts',
+            codePreview,
+            codePreview.length === options.input.code.length ? '' : '... // truncated',
+            '```',
+          ].join('\n')
+        ),
+      },
+    };
+  }
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<CodeActParameters>,
+    _token: vscode.CancellationToken
+  ): Promise<vscode.LanguageModelToolResult> {
+    const { code } = options.input;
+
+    if (!code || !code.trim()) {
+      throw new Error('CodeAct tool was called with empty `code` input.');
+    }
+
+    const { stdout, error } = await this.runtime.run(code);
+
+    const parts: vscode.LanguageModelChatMessagePart[] = [];
+
+    if (stdout) {
+      parts.push(
+        new vscode.LanguageModelTextPart(
+          ['```text', stdout, '```'].join('\n')
+        )
+      );
+    }
+
+    if (error) {
+      parts.push(
+        new vscode.LanguageModelTextPart(
+          ['Error while executing CodeAct script:', '```text', error, '```'].join(
+            '\n'
+          )
+        )
+      );
+    }
+
+    if (!stdout && !error) {
+      parts.push(
+        new vscode.LanguageModelTextPart(
+          'CodeAct script completed with no output.'
+        )
+      );
+    }
+
+    return new vscode.LanguageModelToolResult(parts);
+  }
+}
+
+export function activate(context: vscode.ExtensionContext) {
+  // The name here must match `contributes.languageModelTools[*].name` in package.json
+  context.subscriptions.push(
+    vscode.lm.registerTool('codeact_run', new CodeActTool())
+  );
+}
+
+export function deactivate() {
+  // Nothing special; the runtime dies with the extension host
+}
