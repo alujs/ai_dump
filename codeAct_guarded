@@ -1,0 +1,429 @@
+Got you. Let’s assume nothing exists yet and you want one markdown file you can follow to spin up a **minimal CodeAct‑lite extension** and test it in the repo.
+
+Here’s the whole thing in one shot.
+
+---
+
+# CodeAct‑Lite POC for VS Code + Copilot (from zero)
+
+This gives you a **fresh VS Code extension** that:
+
+* registers a single Copilot tool: `run_code`
+* keeps a **persistent Node VM** per workspace
+* exposes one codemod helper inside that VM:
+  `codemod.replaceInFile(relPath, fromText, toText)`
+
+LLM writes JS → VM runs it → file changes. That’s it. No governance, no graph, no workflows.
+
+Use this only in QA / disposable branches.
+
+---
+
+## 0. Folder layout
+
+Create a new folder for the extension, e.g.:
+
+```text
+copilot-codeact-lite-poc/
+  package.json
+  tsconfig.json
+  src/
+    extension.ts
+```
+
+Everything below assumes that structure.
+
+---
+
+## 1. `package.json`
+
+Put this in `copilot-codeact-lite-poc/package.json`:
+
+```json
+{
+  "name": "copilot-codeact-lite-poc",
+  "displayName": "Copilot CodeAct-Lite POC",
+  "publisher": "your-name-here",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "*"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "contributes": {
+    "languageModelTools": [
+      {
+        "name": "run_code",
+        "displayName": "Run Code (VM POC)",
+        "description": "Executes JavaScript in a persistent Node VM sandbox for Copilot.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["code"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "Pure JavaScript to execute in the VM. No markdown fences or prose."
+            }
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.5.0"
+  }
+}
+```
+
+This:
+
+* declares the VS Code extension entrypoint `dist/extension.js`
+* registers a **language model tool** called `run_code` with a single string field `code`
+
+---
+
+## 2. `tsconfig.json`
+
+Drop this in `copilot-codeact-lite-poc/tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}
+```
+
+This compiles `src/extension.ts` into `dist/extension.js`.
+
+---
+
+## 3. `src/extension.ts`
+
+Create `copilot-codeact-lite-poc/src/extension.ts` with this content:
+
+````ts
+import * as vscode from "vscode";
+import * as vm from "vm";
+import * as fs from "fs";
+import * as path from "path";
+
+interface RunCodeInput {
+  code: string;
+}
+
+/**
+ * Ultra-minimal persistent Node VM runtime.
+ *
+ * - One vm.Context per workspace.
+ * - Captures console.log / console.error into buffers.
+ * - Exposes a tiny codemod helper:
+ *
+ *     const result = codemod.replaceInFile("src/file.ts", "Old", "New");
+ *
+ *   which does naive string replacement and writes the file back.
+ *
+ * This is a POC and not safe. Use only in QA / disposable branches.
+ */
+class NodeRuntime {
+  private context: vm.Context;
+  private stdoutBuffer: string[] = [];
+  private stderrBuffer: string[] = [];
+
+  constructor(private workspaceRoot: string) {
+    const self = this;
+
+    const sandbox: any = {};
+
+    // Capture logs instead of printing directly
+    sandbox.console = {
+      log: (...args: any[]) => {
+        self.stdoutBuffer.push(args.map(String).join(" "));
+      },
+      error: (...args: any[]) => {
+        self.stderrBuffer.push(args.map(String).join(" "));
+      }
+    };
+
+    // Tiny "codemod" surface
+    sandbox.codemod = {
+      /**
+       * Naive codemod: replace all occurrences of fromText with toText
+       * in a file under the workspace root.
+       */
+      replaceInFile: (
+        relPath: string,
+        fromText: string,
+        toText: string
+      ): {
+        file: string;
+        fromText: string;
+        toText: string;
+        occurrences: number;
+        changed: boolean;
+      } => {
+        const absPath = path.join(self.workspaceRoot, relPath);
+        const original = fs.readFileSync(absPath, "utf8");
+
+        if (!fromText) {
+          return {
+            file: relPath,
+            fromText,
+            toText,
+            occurrences: 0,
+            changed: false
+          };
+        }
+
+        const parts = original.split(fromText);
+        const occurrences = parts.length - 1;
+        const updated = parts.join(toText);
+
+        if (occurrences > 0) {
+          fs.mkdirSync(path.dirname(absPath), { recursive: true });
+          fs.writeFileSync(absPath, updated, "utf8");
+        }
+
+        return {
+          file: relPath,
+          fromText,
+          toText,
+          occurrences,
+          changed: occurrences > 0
+        };
+      }
+    };
+
+    // Let the agent stash state if it wants
+    sandbox.globalThis = sandbox;
+
+    this.context = vm.createContext(sandbox, {
+      name: "copilot-codeact-lite-vm"
+    });
+  }
+
+  async execute(code: string): Promise<{ stdout: string; stderr: string }> {
+    this.stdoutBuffer = [];
+    this.stderrBuffer = [];
+
+    try {
+      // Wrap snippet in async IIFE so top-level await works
+      const wrapped = `(async () => {\n${code}\n})();`;
+
+      const script = new vm.Script(wrapped, {
+        filename: "copilot_agent_code.js",
+        displayErrors: true
+      });
+
+      const result = script.runInContext(this.context, {
+        timeout: 10_000 // ms
+      });
+
+      if (result && typeof (result as any).then === "function") {
+        await (result as Promise<unknown>);
+      }
+    } catch (err: any) {
+      this.stderrBuffer.push(String(err?.stack ?? err));
+    }
+
+    return {
+      stdout: this.stdoutBuffer.join("\n"),
+      stderr: this.stderrBuffer.join("\n")
+    };
+  }
+}
+
+export function activate(context: vscode.ExtensionContext) {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    console.warn(
+      "[copilot-codeact-lite-poc] No workspace open; run_code will have nothing to do."
+    );
+    return;
+  }
+
+  const workspaceRoot = workspaceFolders[0].uri.fsPath;
+  const runtime = new NodeRuntime(workspaceRoot);
+
+  const tool: vscode.LanguageModelTool<RunCodeInput> = {
+    async prepareInvocation(options, _token) {
+      const fullCode = options.input.code ?? "";
+      const preview = fullCode.slice(0, 300);
+
+      const md = new vscode.MarkdownString(
+        [
+          "**run_code POC**",
+          "",
+          "This will execute the following JavaScript in a persistent Node VM:",
+          "",
+          "```js",
+          preview,
+          preview.length === fullCode.length ? "" : "// ... (truncated)",
+          "```",
+          "",
+          "_Warning: this is a proof-of-concept. It can read/write files under the workspace root._"
+        ].join("\n")
+      );
+      md.isTrusted = true;
+
+      return {
+        invocationMessage: "Executing agent-generated code in NodeRuntime",
+        confirmationMessages: {
+          title: "Run agent code (POC)",
+          message: md
+        }
+      };
+    },
+
+    async invoke(options, _token) {
+      const code = options.input.code;
+      const parts: vscode.LanguageModelChatMessagePart[] = [];
+
+      if (!code || !code.trim()) {
+        parts.push(
+          new vscode.LanguageModelTextPart(
+            "run_code was called with empty `code`."
+          )
+        );
+        return new vscode.LanguageModelToolResult(parts);
+      }
+
+      const { stdout, stderr } = await runtime.execute(code);
+
+      if (stdout) {
+        parts.push(
+          new vscode.LanguageModelTextPart(
+            ["**stdout:**", "", "```text", stdout, "```"].join("\n")
+          )
+        );
+      }
+
+      if (stderr) {
+        parts.push(
+          new vscode.LanguageModelTextPart(
+            ["**stderr:**", "", "```text", stderr, "```"].join("\n")
+          )
+        );
+      }
+
+      if (!stdout && !stderr) {
+        parts.push(
+          new vscode.LanguageModelTextPart(
+            "Code executed with no output."
+          )
+        );
+      }
+
+      return new vscode.LanguageModelToolResult(parts);
+    }
+  };
+
+  // Tool name must match contributes.languageModelTools[*].name in package.json
+  context.subscriptions.push(vscode.lm.registerTool("run_code", tool));
+}
+
+export function deactivate() {
+  // VM dies with the extension host.
+}
+````
+
+This is the entire CodeAct‑lite VM.
+
+---
+
+## 4. Optional: `.github/copilot-instructions.md` in the  repo
+
+In the ** repo** where you actually want to use this, you can add a repo‑level instruction file like:
+
+````markdown
+# Copilot instructions for this repo
+
+This repository is wired to a Copilot tool named `run_code`.
+
+- `run_code` executes **JavaScript** inside a **persistent Node.js VM**.
+- The VM is shared across `run_code` calls in this workspace session.
+- Inside the VM you can:
+  - use `console.log(...)` (output is returned in the tool result),
+  - use `codemod.replaceInFile(relPath, fromText, toText)` for naive string replacement in a file under the repo root.
+
+When you need bulk or codemod-style changes:
+
+1. Explain the plan in natural language.
+2. Call `run_code` with **pure JavaScript** in the `code` field (no markdown fences).
+3. Inside `code`, use `codemod.replaceInFile(...)` and `console.log(JSON.stringify(...))` to report what you did.
+4. After the tool result, summarize which files changed.
+
+Example style:
+
+```js
+const result = codemod.replaceInFile(
+  "src/legacy/payroll.ts",
+  "OldTax",
+  "NewTax"
+);
+console.log(JSON.stringify({ type: "codemodResult", result }, null, 2));
+````
+
+Use `run_code` for codemod-style changes; do not try to hand-edit every occurrence directly.
+
+````
+
+This just nudges Copilot toward using the tool.
+
+---
+
+## 5. How to build + run this right now
+
+From the `copilot-codeact-lite-poc` folder:
+
+1. Install deps:
+
+   ```bash
+   npm install
+````
+
+2. Build:
+
+   ```bash
+   npm run build
+   ```
+
+3. Open this folder in VS Code and press **F5** to launch an “Extension Development Host”.
+
+4. In that dev host:
+
+   * open your ** QA repo** (or a sandbox clone),
+   * make sure Copilot is enabled in that window.
+
+5. Open Copilot Chat and say something like:
+
+   > “Use the `run_code` tool to replace all occurrences of `OldTax` with `NewTax` in `src/legacy/payroll.ts`. Put only JavaScript in the `code` field and call `codemod.replaceInFile`. Log the result with `console.log(JSON.stringify(...))`.”
+
+If everything is wired:
+
+* Copilot should call `run_code` with some JS using `codemod.replaceInFile`,
+* the VM will run it and actually change the file under the repo,
+* the tool output in chat will show whatever it logged,
+* you’ll see the diff in the editor.
+
+That’s the bare‑bones CodeAct‑ish setup you asked for: minimal extension, minimal VM, one codemod helper, ready to abuse in QA.
